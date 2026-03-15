@@ -1,6 +1,6 @@
 #pragma once
 
-// Phase 0 – Lightweight Logger using std::format (C++20)
+// Phase 0 – Lightweight Logger using std::format (C++20) or libfmt fallback.
 //
 // Design rationale:
 //   Heavy logging frameworks (spdlog, log4cxx) introduce heap allocations and
@@ -8,8 +8,23 @@
 //   used *off* the hot path only – status messages, validation results, and
 //   session summaries.  In the processing loop, latency counters are written to
 //   a pre-allocated ring buffer (see Telemetry.hpp) instead.
+//
+// Compiler compatibility:
+//   <format> requires GCC 13+ / MSVC 19.29+ / Clang 14+.
+//   On older toolchains (e.g. GCC 12) we fall back to {fmt} (libfmt-dev),
+//   which is API-compatible and was the basis for the std::format proposal.
 
-#include <format>
+#if __has_include(<format>)
+#  include <format>
+#  define REUNICLUS_FORMAT_NS std
+#elif __has_include(<fmt/format.h>)
+#  define FMT_HEADER_ONLY
+#  include <fmt/format.h>
+#  define REUNICLUS_FORMAT_NS fmt
+#else
+#  error "No format library found. On GCC 12: sudo apt install libfmt-dev"
+#endif
+
 #include <string_view>
 #include <cstdio>
 #include <chrono>
@@ -32,7 +47,7 @@ public:
     template<typename... Args>
     void log(LogLevel lvl, std::string_view fmt, Args&&... args) {
         if (lvl < min_level_) return;
-        auto msg = std::vformat(fmt, std::make_format_args(args...));
+        auto msg = REUNICLUS_FORMAT_NS::vformat(fmt, REUNICLUS_FORMAT_NS::make_format_args(args...));
         auto now = std::chrono::system_clock::now();
         auto ts  = std::chrono::duration_cast<std::chrono::microseconds>(
                        now.time_since_epoch()).count();

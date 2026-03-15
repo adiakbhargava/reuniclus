@@ -163,7 +163,7 @@ private:
             return 2.0 * llt.matrixL().toDenseMatrix()
                              .diagonal().array().log().sum();
         }
-        return M.fullPivLu().logAbsDeterminant();
+        return M.fullPivLu().matrixLU().diagonal().array().abs().log().sum();
     }
 };
 

@@ -16,6 +16,7 @@
 //   flagged low-confidence epochs, plasticity indicators with anatomical
 //   context, difficulty progression history, next-session recommendations.
 
+#include <reuniclus/Logger.hpp>
 #include <reuniclus/Telemetry.hpp>
 #include <reuniclus/DifficultyController.hpp>
 
@@ -147,21 +148,21 @@ public:
     {
         std::ofstream f(path);
         f << "=== Reuniclus Clinical Session Report ===\n\n";
-        f << std::format("Session duration        : {:.1f} s\n",  s.duration_s);
-        f << std::format("Total trials            : {}\n",        s.total_trials);
-        f << std::format("Mean task accuracy      : {:.1f}%\n",   s.mean_accuracy * 100);
-        f << std::format("Mean decoder confidence : {:.3f}\n",    s.mean_confidence);
-        f << std::format("Low-confidence epochs   : {}\n",        s.low_confidence_epochs);
-        f << std::format("Plasticity score        : {:.4f}\n",    s.plasticity_score);
-        f << std::format("Mean latency            : {:.1f} µs\n", s.mean_latency_us);
-        f << std::format("p99 latency             : {:.1f} µs\n", s.p99_latency_us);
+        f << REUNICLUS_FORMAT_NS::format("Session duration        : {:.1f} s\n",  s.duration_s);
+        f << REUNICLUS_FORMAT_NS::format("Total trials            : {}\n",        s.total_trials);
+        f << REUNICLUS_FORMAT_NS::format("Mean task accuracy      : {:.1f}%\n",   s.mean_accuracy * 100);
+        f << REUNICLUS_FORMAT_NS::format("Mean decoder confidence : {:.3f}\n",    s.mean_confidence);
+        f << REUNICLUS_FORMAT_NS::format("Low-confidence epochs   : {}\n",        s.low_confidence_epochs);
+        f << REUNICLUS_FORMAT_NS::format("Plasticity score        : {:.4f}\n",    s.plasticity_score);
+        f << REUNICLUS_FORMAT_NS::format("Mean latency            : {:.1f} µs\n", s.mean_latency_us);
+        f << REUNICLUS_FORMAT_NS::format("p99 latency             : {:.1f} µs\n", s.p99_latency_us);
         f << "\nRecommendation:\n  " << s.recommended_next_params << "\n";
 
         if (!trials.empty()) {
             f << "\nDifficulty Progression:\n";
             f << "trial,accuracy,engagement,target_size,assistance\n";
             for (auto& t : trials) {
-                f << std::format("{},{:.3f},{:.3f},{:.2f},{:.2f}\n",
+                f << REUNICLUS_FORMAT_NS::format("{},{:.3f},{:.3f},{:.2f},{:.2f}\n",
                                  t.trial_index, t.accuracy, t.engagement,
                                  t.params.target_size, t.params.assistance_level);
             }

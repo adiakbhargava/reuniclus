@@ -177,9 +177,13 @@ def train(data_path: str, labels_path: str, output_path: str,
                   f"val_loss={val_loss:.6f}")
 
     # Phase 4.3: Export via TorchScript
+    # weight_norm hooks are not scriptable in PyTorch >= 2.x; fall back to trace
     model.eval().cpu()
-    scripted = torch.jit.script(model)
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    try:
+        scripted = torch.jit.script(model)
+    except Exception:
+        scripted = torch.jit.trace(model, torch.randn(1, n_channels, window_size))
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     scripted.save(output_path)
     print(f"Model saved to {output_path}")
 
@@ -213,13 +217,15 @@ if __name__ == "__main__":
     parser.add_argument("--output", default="models/tcn_decoder.pt")
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--latent-dim", type=int, default=16)
+    parser.add_argument("--n-channels", type=int, default=64,
+                        help="Number of EEG channels (must match n_selected_ch in main.cpp)")
     parser.add_argument("--synthetic", action="store_true",
                         help="Generate and use synthetic data for smoke test")
     args = parser.parse_args()
 
     if args.synthetic or (args.data is None):
         print("Using synthetic data...")
-        X, Z = generate_synthetic_data(latent_dim=args.latent_dim)
+        X, Z = generate_synthetic_data(n_channels=args.n_channels, latent_dim=args.latent_dim)
         np.save("/tmp/synthetic_X.npy", X)
         np.save("/tmp/synthetic_Z.npy", Z)
         args.data   = "/tmp/synthetic_X.npy"

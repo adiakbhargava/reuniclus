@@ -32,24 +32,31 @@ struct EmulationFrame {
     Eigen::VectorXd channel_activations;  // Mean firing rate per electrode channel
 };
 
+// Moved outside LIFNetwork to work around GCC 12's limitation with nested
+// aggregate types that have default member initialisers used as default
+// constructor parameters (see CWG 2335 / GCC bug 88165).
+struct LIFParams {
+    double tau_m     = 20e-3;   // Membrane time constant (s)
+    double V_rest    = -70.0;   // Resting potential (mV)
+    double V_thresh  = -50.0;   // Spike threshold (mV)
+    double V_reset   = -75.0;   // Post-spike reset (mV)
+    double R_m       = 10.0;    // Membrane resistance (MΩ)
+    double dt        = 1e-3;    // Integration timestep (s)
+    double noise_std = 0.5;     // Synaptic noise std (mV/step)
+};
+
 class LIFNetwork {
 public:
-    struct LIFParams {
-        double tau_m     = 20e-3;   // Membrane time constant (s)
-        double V_rest    = -70.0;   // Resting potential (mV)
-        double V_thresh  = -50.0;   // Spike threshold (mV)
-        double V_reset   = -75.0;   // Post-spike reset (mV)
-        double R_m       = 10.0;    // Membrane resistance (MΩ)
-        double dt        = 1e-3;    // Integration timestep (s)
-        double noise_std = 0.5;     // Synaptic noise std (mV/step)
-    };
+    // Keep nested alias for backward compatibility with any call sites.
+    using LIFParams = ::reuniclus::LIFParams;
 
     explicit LIFNetwork(const ConnectomeGraph& graph,
-                        LIFParams params = {})
+                        LIFParams params = LIFParams{})
         : graph_(graph)
         , p_(params)
         , n_ch_(graph.n_channels())
         , V_(Eigen::VectorXd::Constant(n_ch_, params.V_rest))
+        , spike_this_step_(Eigen::VectorXd::Zero(n_ch_))
         , spike_count_(Eigen::VectorXd::Zero(n_ch_))
         , rng_(std::random_device{}())
         , noise_(0.0, params.noise_std)
@@ -89,9 +96,10 @@ public:
     [[nodiscard]] EmulationFrame read_output() const {
         EmulationFrame f;
         double elapsed = step_count_ * p_.dt;
-        f.channel_activations = elapsed > 0.0
-            ? spike_count_ / elapsed
-            : Eigen::VectorXd::Zero(n_ch_);
+        if (elapsed > 0.0)
+            f.channel_activations = spike_count_ / elapsed;
+        else
+            f.channel_activations = Eigen::VectorXd::Zero(n_ch_);
         return f;
     }
 

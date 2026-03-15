@@ -68,7 +68,7 @@ public:
     // ── Graph Laplacian L = D − A ──────────────────────────────────────────
     [[nodiscard]] Eigen::MatrixXd laplacian() const {
         Eigen::VectorXd degrees = A_.rowwise().sum();
-        return degrees.asDiagonal() - A_;
+        return Eigen::MatrixXd(degrees.asDiagonal()) - A_;
     }
 
     // ── Spectral decomposition L = UΛUᵀ ───────────────────────────────────

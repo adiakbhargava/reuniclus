@@ -10,6 +10,10 @@
 //   liblsl resolve_stream() blocks until a matching LSL stream appears on the
 //   network.  In practice, start the LSL source before calling start().
 
+// LSLIngestor is only compiled when liblsl was found by CMake.
+// Without it the SyntheticIngestor or UDPIngestor provide data instead.
+#ifdef REUNICLUS_HAS_LSL
+
 #include <reuniclus/Ingestor.hpp>
 #include <reuniclus/NeuralFrame.hpp>
 #include <reuniclus/SPSCRingBuffer.hpp>
@@ -21,19 +25,14 @@
 #include <string>
 #include <cstddef>
 
-// Forward-declare liblsl types so this header compiles even when liblsl is not
-// installed (useful for CI builds that stub the library).
-namespace lsl {
-    class stream_inlet;
-    struct stream_info;
-    std::vector<stream_info> resolve_stream(const std::string&, const std::string&, int, double);
-}
+// Full LSL header – available because CMake found liblsl (REUNICLUS_HAS_LSL defined).
+#include <lsl_cpp.h>
 
 namespace reuniclus {
 
 class LSLIngestor final : public Ingestor {
 public:
-    explicit LSLIngestor(SPSCRingBuffer<NeuralFrame, 1024>& buffer,
+    explicit LSLIngestor(SPSCRingBuffer<NeuralFrame, 4096>& buffer,
                          std::string stream_type = "EEG")
         : buffer_(buffer), stream_type_(std::move(stream_type)) {}
 
@@ -85,10 +84,12 @@ private:
         }
     }
 
-    SPSCRingBuffer<NeuralFrame, 1024>& buffer_;
+    SPSCRingBuffer<NeuralFrame, 4096>& buffer_;
     std::string                         stream_type_;
     std::jthread                        worker_;
     std::atomic<std::size_t>            dropped_{0};
 };
 
 } // namespace reuniclus
+
+#endif // REUNICLUS_HAS_LSL

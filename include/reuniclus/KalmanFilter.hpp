@@ -76,15 +76,24 @@ public:
         I_     = Eigen::MatrixXd::Identity(d_, d_);
     }
 
-    // ── One filter step ───────────────────────────────────────────────────────
+    // ── Predict step only (no observation) ───────────────────────────────────
+    // Used when no new inference result is available. Advances the prior
+    // without generating an innovation, keeping residuals independent.
+    Estimate predict_only() {
+        z_hat_ = A_ * z_hat_;
+        P_     = A_ * P_ * A_.transpose() + Q_;
+        return {z_hat_, P_, last_conf_, 0.0};
+    }
+
+    // ── Full predict + update step ────────────────────────────────────────────
     Estimate update(const Eigen::VectorXd& observation) {
         // ── Predict ──────────────────────────────────────────────────────────
         Eigen::VectorXd z_pred = A_ * z_hat_;
         Eigen::MatrixXd P_pred = A_ * P_ * A_.transpose() + Q_;
 
         // ── Update ───────────────────────────────────────────────────────────
-        Eigen::MatrixXd S         = C_ * P_pred * C_.transpose() + R_;
-        Eigen::MatrixXd K         = P_pred * C_.transpose() * S.inverse();
+        Eigen::MatrixXd S          = C_ * P_pred * C_.transpose() + R_;
+        Eigen::MatrixXd K          = P_pred * C_.transpose() * S.inverse();
         Eigen::VectorXd innovation = observation - C_ * z_pred;
 
         z_hat_ = z_pred + K * innovation;
@@ -92,9 +101,9 @@ public:
 
         // ── Confidence (Mahalanobis anomaly score) ────────────────────────────
         double maha = innovation.transpose() * S.inverse() * innovation;
-        double conf = 1.0 - chi2_cdf(maha, static_cast<int>(observation.size()));
+        last_conf_  = 1.0 - chi2_cdf(maha, static_cast<int>(observation.size()));
 
-        return {z_hat_, P_, conf, maha};
+        return {z_hat_, P_, last_conf_, maha};
     }
 
     // ── Posterior entropy  H = (d/2)log(2πe) + (1/2)log|P| ──────────────────
@@ -104,8 +113,10 @@ public:
         Eigen::LLT<Eigen::MatrixXd> llt(P_);
         if (llt.info() != Eigen::Success) {
             // Fall back to LU if P is numerically non-PD
-            return 0.5 * P_.fullPivLu().logAbsDeterminant()
-                   + 0.5 * d_ * std::log(2.0 * M_PI * M_E);
+            // log|det(P)| = sum of log|diag(U)| from LU factorisation
+            double log_det_lu = P_.fullPivLu().matrixLU()
+                                    .diagonal().array().abs().log().sum();
+            return 0.5 * log_det_lu + 0.5 * d_ * std::log(2.0 * M_PI * M_E);
         }
         double log_det = 2.0 * llt.matrixL().toDenseMatrix()
                                   .diagonal().array().log().sum();
@@ -178,6 +189,7 @@ private:
     Eigen::MatrixXd P_;
     Eigen::MatrixXd I_;
     int             d_;
+    double          last_conf_{1.0};  // cached for predict_only() returns
 };
 
 } // namespace reuniclus

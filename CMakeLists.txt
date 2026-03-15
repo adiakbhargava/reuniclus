@@ -35,7 +35,7 @@ find_path(LSL_INCLUDE lsl_cpp.h HINTS ${CMAKE_SOURCE_DIR}/third_party/liblsl/inc
 #            /O2 /fp:fast are the MSVC equivalents of -O3 -ffast-math.
 #            /W4 for high-warning level.
 set(REUNICLUS_COMPILE_OPTIONS
-    $<$<CXX_COMPILER_ID:GNU,Clang>:-mavx512f -O3 -ffast-math>
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-mavx2 -mfma -O3 -ffast-math>
     $<$<CXX_COMPILER_ID:MSVC>:/arch:AVX2 /O2 /fp:fast /W4>
 )
 
@@ -59,6 +59,10 @@ target_link_libraries(reuniclus
 )
 
 target_compile_options(reuniclus PRIVATE ${REUNICLUS_COMPILE_OPTIONS})
+
+if(LSL_LIB AND LSL_INCLUDE)
+    target_compile_definitions(reuniclus PRIVATE REUNICLUS_HAS_LSL)
+endif()
 
 # ── Unit tests ────────────────────────────────────────────────────────────────
 enable_testing()
@@ -88,21 +92,11 @@ include(GoogleTest)
 gtest_discover_tests(reuniclus_tests)
 
 # ── Benchmarks ────────────────────────────────────────────────────────────────
-add_executable(reuniclus_benchmarks
-    benchmarks/bench_spsc.cpp
-    benchmarks/bench_signal.cpp
-)
-
-target_include_directories(reuniclus_benchmarks
-    PRIVATE
-        ${CMAKE_SOURCE_DIR}/include
-)
-
-target_link_libraries(reuniclus_benchmarks
-    PRIVATE
-        benchmark::benchmark_main
-        Eigen3::Eigen
-        ${TORCH_LIBRARIES}
-)
-
-target_compile_options(reuniclus_benchmarks PRIVATE ${REUNICLUS_COMPILE_OPTIONS})
+# Each file has its own BENCHMARK_MAIN(), so each becomes its own executable.
+foreach(bench_src bench_spsc bench_signal)
+    add_executable(${bench_src} benchmarks/${bench_src}.cpp)
+    target_include_directories(${bench_src} PRIVATE ${CMAKE_SOURCE_DIR}/include)
+    target_link_libraries(${bench_src}
+        PRIVATE benchmark::benchmark_main Eigen3::Eigen ${TORCH_LIBRARIES})
+    target_compile_options(${bench_src} PRIVATE ${REUNICLUS_COMPILE_OPTIONS})
+endforeach()

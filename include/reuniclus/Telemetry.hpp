@@ -55,7 +55,7 @@ public:
             .maha_dist    = maha_dist,
             .wall_time_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now).count()
         };
-        buf_.try_push(rec);
+        (void)buf_.try_push(rec);  // drop silently if full — telemetry is best-effort
         total_frames_.fetch_add(1, std::memory_order_relaxed);
     }
 

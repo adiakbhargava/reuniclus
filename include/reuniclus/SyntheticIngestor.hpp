@@ -30,7 +30,7 @@ public:
     /// @param buffer     Destination ring buffer.
     /// @param rate_hz    Simulated sampling rate (default 1000 Hz).
     /// @param noise_std  Gaussian noise standard deviation (µV, default 5.0).
-    explicit SyntheticIngestor(SPSCRingBuffer<NeuralFrame, 1024>& buffer,
+    explicit SyntheticIngestor(SPSCRingBuffer<NeuralFrame, 4096>& buffer,
                                double rate_hz   = 1000.0,
                                float  noise_std = 5.0f)
         : buffer_(buffer), rate_hz_(rate_hz), noise_std_(noise_std) {}
@@ -89,7 +89,7 @@ private:
         }
     }
 
-    SPSCRingBuffer<NeuralFrame, 1024>& buffer_;
+    SPSCRingBuffer<NeuralFrame, 4096>& buffer_;
     double                              rate_hz_;
     float                               noise_std_;
     std::thread                         worker_;

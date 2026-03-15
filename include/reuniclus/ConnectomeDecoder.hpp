@@ -44,12 +44,13 @@ public:
     /// @param window_size  Time steps per inference pass.
     ConnectomeDecoder(const std::string&     model_path,
                       const ConnectomeGraph& graph,
+                      int                    n_channels  = 64,   // post-selection channel count
                       int                    latent_dim  = 16,
-                      int                    window_size = 100)
+                      int                    window_size = 1000)
         : graph_(graph)
         , latent_dim_(latent_dim)
         , window_size_(window_size)
-        , n_ch_(graph.n_channels())
+        , n_ch_(n_channels)
     {
         try {
             model_ = torch::jit::load(model_path);

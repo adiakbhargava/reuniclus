@@ -23,7 +23,9 @@
 #include <reuniclus/NeuralFrame.hpp>
 #include <reuniclus/SPSCRingBuffer.hpp>
 #include <reuniclus/SyntheticIngestor.hpp>
-#include <reuniclus/LSLIngestor.hpp>
+#ifdef REUNICLUS_HAS_LSL
+#  include <reuniclus/LSLIngestor.hpp>
+#endif
 #include <reuniclus/SignalProcessor.hpp>
 #include <reuniclus/NeuralEngine.hpp>
 #include <reuniclus/KalmanFilter.hpp>
@@ -31,6 +33,7 @@
 #include <reuniclus/ChannelSelector.hpp>
 #include <reuniclus/ConnectomeGraph.hpp>
 #include <reuniclus/ConnectomeDecoder.hpp>
+#include <reuniclus/InferenceWorker.hpp>
 #include <reuniclus/LIFNetwork.hpp>
 #include <reuniclus/Telemetry.hpp>
 #include <reuniclus/DifficultyController.hpp>
@@ -39,9 +42,9 @@
 #include <Eigen/Dense>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <csignal>
 #include <filesystem>
-#include <format>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -70,14 +73,16 @@ static KalmanFilter make_default_kalman(int latent_dim) {
 
 // ── Context passed into the processing thread ─────────────────────────────────
 struct ProcessorContext {
-    SPSCRingBuffer<NeuralFrame, 1024>&   buffer;
+    SPSCRingBuffer<NeuralFrame, 4096>&   buffer;
     SignalProcessor&                     dsp;
     KalmanFilter&                        kf;
     Telemetry&                           telemetry;
     const std::vector<int>&              selected_channels;
-    NeuralEngine*                        tcn_engine;    // nullptr = fallback
-    ConnectomeDecoder*                   graph_engine;  // nullptr = fallback
+    InferenceWorker*                     tcn_worker;    // nullptr = fallback
+    InferenceWorker*                     graph_worker;  // nullptr = fallback
     int                                  latent_dim;
+    int                                  infer_window;  // time steps per inference call
+    int                                  infer_stride;  // frames between submit() calls
     std::mutex&                          trial_mutex;
     std::vector<TrialRecord>&            trial_records;
     DifficultyController&                difficulty;
@@ -91,7 +96,17 @@ struct ProcessorContext {
 static void processing_loop(ProcessorContext& ctx) {
     const int latent_dim = ctx.latent_dim;
     const int n_selected = static_cast<int>(ctx.selected_channels.size());
+    const int win        = ctx.infer_window;
     const double kSafetyThreshold = 0.05;
+
+    // Sliding window buffer: channel-major layout [n_selected × win]
+    // Each new frame appends one sample per channel; oldest sample is shifted out.
+    std::vector<float> infer_win(n_selected * win, 0.0f);
+    int frames_accumulated = 0;
+    int frames_since_infer = 0;
+    // Cached latents — reused between inference calls (stride > 1)
+    std::vector<float> cached_tcn(ctx.latent_dim, 0.0f);
+    std::vector<float> cached_graph(ctx.latent_dim, 0.0f);
 
     int    trial_frame_count = 0;
     double trial_acc_sum     = 0.0;
@@ -117,33 +132,61 @@ static void processing_loop(ProcessorContext& ctx) {
         std::vector<float> selected =
             ChannelSelector::apply_mask(frame.channels.data(), ctx.selected_channels);
 
-        // ── Phase 4: TCN inference ─────────────────────────────────────────
-        std::vector<float> tcn_latent(latent_dim, 0.0f);
-        if (ctx.tcn_engine) {
-            tcn_latent = ctx.tcn_engine->infer(selected.data(), n_selected);
-        } else {
-            for (int i = 0; i < latent_dim && i < n_selected; ++i)
-                tcn_latent[i] = selected[i];
+        // ── Accumulate sliding window (channel-major: ch × time) ─────────
+        for (int c = 0; c < n_selected; ++c) {
+            float* ch_ptr = infer_win.data() + c * win;
+            std::memmove(ch_ptr, ch_ptr + 1, (win - 1) * sizeof(float));
+            ch_ptr[win - 1] = selected[c];
+        }
+        if (frames_accumulated < win) ++frames_accumulated;
+        const bool win_ready    = (frames_accumulated >= win);
+        const bool run_infer    = win_ready && (++frames_since_infer >= ctx.infer_stride);
+        if (run_infer) frames_since_infer = 0;
+
+        // ── Phase 4 + 7: Submit window to async workers (non-blocking) ────
+        if (run_infer) {
+            if (ctx.tcn_worker)   ctx.tcn_worker->submit(infer_win, n_selected);
+            if (ctx.graph_worker) ctx.graph_worker->submit(infer_win, n_selected);
         }
 
-        // ── Phase 7: Graph decoder inference ──────────────────────────────
-        std::vector<float> graph_latent(latent_dim, 0.0f);
-        if (ctx.graph_engine) {
-            graph_latent = ctx.graph_engine->infer(selected.data(), n_selected);
+        // Read latest results; is_new=true exactly once per completed inference.
+        bool tcn_new = false, graph_new = false;
+        if (ctx.tcn_worker) {
+            auto [latent, is_new] = ctx.tcn_worker->latest_with_flag();
+            if (is_new) cached_tcn = std::move(latent);
+            tcn_new = is_new;
         } else {
-            graph_latent = tcn_latent;  // Single-path fallback
+            for (int i = 0; i < latent_dim && i < n_selected; ++i)
+                cached_tcn[i] = selected[i];
+            tcn_new = true;  // fallback always "fresh"
         }
+        if (ctx.graph_worker) {
+            auto [latent, is_new] = ctx.graph_worker->latest_with_flag();
+            if (is_new) cached_graph = std::move(latent);
+            graph_new = is_new;
+        } else {
+            cached_graph = cached_tcn;
+            graph_new    = tcn_new;
+        }
+        const std::vector<float>& tcn_latent   = cached_tcn;
+        const std::vector<float>& graph_latent = cached_graph;
 
         // ── Fuse: weighted average by decoder confidence ────────────────────
         auto fused = fuse_estimates(tcn_latent, graph_latent, 0.5, 0.5);
 
         // ── Phase 5: Kalman filter ─────────────────────────────────────────
-        Eigen::VectorXd obs = Eigen::Map<Eigen::VectorXd>(
-            fused.data(), static_cast<Eigen::Index>(fused.size()));
-        if (obs.size() > static_cast<Eigen::Index>(latent_dim))
-            obs = obs.head(latent_dim);
-
-        auto estimate = ctx.kf.update(obs);
+        // Full update only when inference produced a genuinely new observation;
+        // otherwise predict-only so innovations stay temporally independent.
+        KalmanFilter::Estimate estimate;
+        if (tcn_new || graph_new) {
+            Eigen::VectorXd obs = Eigen::Map<Eigen::VectorXf>(
+                fused.data(), static_cast<Eigen::Index>(fused.size())).cast<double>();
+            if (obs.size() > static_cast<Eigen::Index>(latent_dim))
+                obs = obs.head(latent_dim);
+            estimate = ctx.kf.update(obs);
+        } else {
+            estimate = ctx.kf.predict_only();
+        }
 
         // ── Confidence gating → device output ─────────────────────────────
         auto output = gate(estimate, kSafetyThreshold);
@@ -198,7 +241,7 @@ static void emulator_loop(LIFNetwork& network,
     while (g_running.load(std::memory_order_relaxed)) {
         network.step();
         auto frame = network.read_output();
-        out_buffer.try_push(frame);
+        (void)out_buffer.try_push(frame);
         std::this_thread::sleep_for(std::chrono::microseconds(900));
     }
 }
@@ -248,7 +291,7 @@ int main(int argc, char* argv[]) {
     }
 
     // ── Shared ring buffers ──────────────────────────────────────────────────
-    SPSCRingBuffer<NeuralFrame, 1024>   neural_buf;
+    SPSCRingBuffer<NeuralFrame, 4096>   neural_buf;
     SPSCRingBuffer<EmulationFrame, 256> emul_buf;
 
     // ── Signal processor ─────────────────────────────────────────────────────
@@ -272,7 +315,7 @@ int main(int argc, char* argv[]) {
     std::unique_ptr<NeuralEngine> tcn_engine;
     if (std::filesystem::exists(tcn_path)) {
         try {
-            tcn_engine = std::make_unique<NeuralEngine>(tcn_path, latent_dim);
+            tcn_engine = std::make_unique<NeuralEngine>(tcn_path, n_selected_ch, latent_dim);
             LOG_INFO("TCN decoder loaded from {}", tcn_path);
         } catch (const std::exception& e) {
             LOG_WARN("TCN load failed: {}. Using fallback.", e.what());
@@ -286,7 +329,7 @@ int main(int argc, char* argv[]) {
     if (std::filesystem::exists(graph_path)) {
         try {
             graph_engine = std::make_unique<ConnectomeDecoder>(
-                graph_path, graph, latent_dim);
+                graph_path, graph, n_selected_ch, latent_dim);
             LOG_INFO("Graph decoder loaded from {}", graph_path);
         } catch (const std::exception& e) {
             LOG_WARN("Graph decoder load failed: {}. Using fallback.", e.what());
@@ -309,12 +352,35 @@ int main(int argc, char* argv[]) {
     std::vector<TelemetryRecord> telem_records;
     telem_records.reserve(1'200'000);
 
+    // ── Async inference workers ───────────────────────────────────────────────
+    // Workers must be declared after engines (and thus destroyed before them).
+    std::unique_ptr<InferenceWorker> tcn_worker;
+    std::unique_ptr<InferenceWorker> graph_worker;
+
+    if (tcn_engine) {
+        auto* eng = tcn_engine.get();
+        tcn_worker = std::make_unique<InferenceWorker>(
+            [eng](const float* d, int n) { return eng->infer(d, n); }, latent_dim);
+        tcn_worker->start();
+    }
+    if (graph_engine) {
+        auto* eng = graph_engine.get();
+        graph_worker = std::make_unique<InferenceWorker>(
+            [eng](const float* d, int n) { return eng->infer(d, n); }, latent_dim);
+        graph_worker->start();
+    }
+
     // ── Ingestor ──────────────────────────────────────────────────────────────
     std::unique_ptr<Ingestor> ingestor;
     if (use_synthetic) {
         ingestor = std::make_unique<SyntheticIngestor>(neural_buf, 1000.0);
     } else {
+#ifdef REUNICLUS_HAS_LSL
         ingestor = std::make_unique<LSLIngestor>(neural_buf);
+#else
+        LOG_WARN("liblsl not available – falling back to SyntheticIngestor");
+        ingestor = std::make_unique<SyntheticIngestor>(neural_buf, 1000.0);
+#endif
     }
 
     // ── Processor context ────────────────────────────────────────────────────
@@ -324,9 +390,11 @@ int main(int argc, char* argv[]) {
         .kf                = kf,
         .telemetry         = telemetry,
         .selected_channels = selected_channels,
-        .tcn_engine        = tcn_engine.get(),
-        .graph_engine      = graph_engine.get(),
+        .tcn_worker        = tcn_worker.get(),
+        .graph_worker      = graph_worker.get(),
         .latent_dim        = latent_dim,
+        .infer_window      = 1000,
+        .infer_stride      = 100,   // run inference at 10 Hz (every 100 ms at 1 kHz)
         .trial_mutex       = trial_mutex,
         .trial_records     = trial_records,
         .difficulty        = difficulty,
@@ -361,6 +429,10 @@ int main(int argc, char* argv[]) {
     g_running = false;
 
     // ── Shutdown ─────────────────────────────────────────────────────────────
+    // Stop workers first — they hold references to engines below.
+    if (tcn_worker)   tcn_worker->stop();
+    if (graph_worker) graph_worker->stop();
+
     ingestor->stop();
     if (processor_thread.joinable()) processor_thread.join();
     if (emulator_thread.joinable())  emulator_thread.join();
@@ -369,14 +441,14 @@ int main(int argc, char* argv[]) {
     // ── Phase 8.4: Final statistics ───────────────────────────────────────────
     auto stats = Telemetry::compute_stats(telem_records);
     std::cout << "\n=== Reuniclus Session Report ===\n"
-              << std::format("Frames processed : {:>10}\n",      stats.n_frames)
-              << std::format("Mean latency     : {:>8.1f} µs\n", stats.mean_ns / 1000.0)
-              << std::format("Median latency   : {:>8.1f} µs\n", stats.median_ns / 1000.0)
-              << std::format("p95 latency      : {:>8.1f} µs\n", stats.p95_ns  / 1000.0)
-              << std::format("p99 latency      : {:>8.1f} µs\n", stats.p99_ns  / 1000.0)
-              << std::format("Max latency      : {:>8.1f} µs\n", stats.max_ns  / 1000.0)
-              << std::format("Mean confidence  : {:>10.4f}\n",   stats.mean_confidence)
-              << std::format("Dropped frames   : {:>10}\n",      ingestor->dropped_frames());
+              << REUNICLUS_FORMAT_NS::format("Frames processed : {:>10}\n",      stats.n_frames)
+              << REUNICLUS_FORMAT_NS::format("Mean latency     : {:>8.1f} µs\n", stats.mean_ns / 1000.0)
+              << REUNICLUS_FORMAT_NS::format("Median latency   : {:>8.1f} µs\n", stats.median_ns / 1000.0)
+              << REUNICLUS_FORMAT_NS::format("p95 latency      : {:>8.1f} µs\n", stats.p95_ns  / 1000.0)
+              << REUNICLUS_FORMAT_NS::format("p99 latency      : {:>8.1f} µs\n", stats.p99_ns  / 1000.0)
+              << REUNICLUS_FORMAT_NS::format("Max latency      : {:>8.1f} µs\n", stats.max_ns  / 1000.0)
+              << REUNICLUS_FORMAT_NS::format("Mean confidence  : {:>10.4f}\n",   stats.mean_confidence)
+              << REUNICLUS_FORMAT_NS::format("Dropped frames   : {:>10}\n",      ingestor->dropped_frames());
 
     // Validation gate
     bool pass_latency = stats.mean_ns < 500'000 && stats.p99_ns < 1'000'000;
@@ -390,11 +462,11 @@ int main(int argc, char* argv[]) {
         maha.reserve(telem_records.size());
         for (auto& r : telem_records) maha.push_back(r.maha_dist);
         double Q_lb  = Telemetry::ljung_box(maha, 20);
-        std::cout << std::format("  innovation white (LB Q={:.2f}) : {}\n",
+        std::cout << REUNICLUS_FORMAT_NS::format("  innovation white (LB Q={:.2f}) : {}\n",
                                  Q_lb, Q_lb < 31.4 ? "PASS" : "FAIL");
     }
 
-    std::cout << std::format("  confidence calibration ({:.3f}) : {}\n",
+    std::cout << REUNICLUS_FORMAT_NS::format("  confidence calibration ({:.3f}) : {}\n",
                              stats.mean_confidence,
                              std::abs(stats.mean_confidence - 0.5) < 0.45
                              ? "PASS" : "FAIL");

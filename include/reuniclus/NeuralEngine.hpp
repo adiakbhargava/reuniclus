@@ -42,9 +42,11 @@ public:
     /// @param latent_dim  Expected output dimensionality (must match the model).
     /// @param window_size Number of time steps fed per inference.
     explicit NeuralEngine(const std::string& model_path,
+                          int                n_channels  = 64,
                           int                latent_dim  = 16,
                           int                window_size = 1000)
-        : latent_dim_(latent_dim)
+        : n_channels_(n_channels)
+        , latent_dim_(latent_dim)
         , window_size_(window_size)
     {
         try {
@@ -93,7 +95,7 @@ public:
 
 private:
     void warmup() {
-        auto dummy = torch::zeros({1, static_cast<int>(kChannels), window_size_});
+        auto dummy = torch::zeros({1, n_channels_, window_size_});
         for (int i = 0; i < 20; ++i) {
             torch::NoGradGuard no_grad;
             model_.forward({dummy});
@@ -101,6 +103,7 @@ private:
     }
 
     mutable torch::jit::script::Module model_;
+    int                                 n_channels_;
     int                                 latent_dim_;
     int                                 window_size_;
 };
