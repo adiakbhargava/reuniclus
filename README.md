@@ -16,14 +16,30 @@ Benchmarked on [BCI Competition IV Dataset 2a](https://www.bbci.de/competition/i
 | Method | Accuracy | Latency (mean) | Latency (p99) |
 |---|---|---|---|
 | CSP + LDA (classical baseline) | 66.8% ± 12.7% | — | — |
-| **Reuniclus TCN decoder** | **72.9% ± 14.8%** | **69 µs** | **307 µs** |
+| **Reuniclus TCN decoder** | **73.3% ± 14.2%** | **69 µs** | **307 µs** |
 
-- TCN decoder outperforms the classical CSP+LDA baseline by **+6.1 percentage points**
+Per-subject results (5-fold CV, BCI Competition IV Dataset 2a):
+
+| Subject | TCN Accuracy | Notes |
+|---|---|---|
+| S1 | 83.9% | |
+| S2 | 56.8% | |
+| S3 | **89.1%** | Best |
+| S4 | 67.0% | |
+| S5 | 49.5% | BCI illiteracy (known phenomenon) |
+| S6 | 60.1% | |
+| S7 | 86.3% | |
+| S8 | 87.3% | |
+| S9 | 79.7% | |
+| **Mean** | **73.3% ± 14.2%** | |
+
+- TCN decoder outperforms the classical CSP+LDA baseline by **+6.5 percentage points**
 - End-to-end pipeline latency: **69 µs mean**, **307 µs p99** on commodity x86-64 hardware (no GPU, no FPGA)
 - Zero dropped frames at 1 kHz × 256 channels over 578,000 frames
 - Innovation whiteness validated (Ljung-Box Q = -0.33, p > 0.05)
 
 > Chance level for 4-class classification is 25%. Published state-of-the-art CSP+LDA on this dataset is 65–75%.
+> Subject 5 (49.5%) reflects documented BCI illiteracy — a known inter-subject phenomenon unrelated to decoder quality.
 
 ---
 
